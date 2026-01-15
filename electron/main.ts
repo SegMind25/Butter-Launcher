@@ -1,5 +1,4 @@
-import { app, BrowserWindow, ipcMain, contextBridge } from "electron";
-import { createRequire } from "node:module";
+import { app, BrowserWindow, ipcMain } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
@@ -8,10 +7,6 @@ import { autoUpdater } from "electron-updater";
 import { downloadGame } from "./game/download";
 import { checkGameInstallation } from "./game/check";
 import { launchGame } from "./game/launch";
-
-const require = createRequire(import.meta.url);
-
-contextBridge.exposeInMainWorld("nodeRequire", require);
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 

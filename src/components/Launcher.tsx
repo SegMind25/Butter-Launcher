@@ -110,7 +110,7 @@ const Launcher: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
                     await launchGame(username);
                   } catch (e) {
                   }
-                  setTimeout(() => setIsLaunching(false), 7000);
+                  setTimeout(() => setIsLaunching(false), 10000);
                 }}
                 disabled={isLaunching}
               >
