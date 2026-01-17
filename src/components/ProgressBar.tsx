@@ -9,6 +9,7 @@ interface Props {
 const PHASES: Record<string, string> = {
   "pwr-download": "Downloading...",
   patching: "Extracting...",
+  "online-patch": "Patching Online System",
   "fix-download": "Downloading Fix...",
   "fix-extract": "Patching Fix...",
   "jre-download": "Downloading JRE...",
@@ -25,17 +26,22 @@ export default function ProgressBar({ progress, className }: Props) {
         {progress.percent > -1 && (
           <div className="text-[10px] text-gray-300">{progress.percent}%</div>
         )}
-        {progress.current !== undefined && progress.total !== undefined && (
+        {progress.current !== undefined && (
           <div className="text-[10px] text-gray-300">
-            {progress.phase.split("-")[1] === "download" ? (
-              <>
-                {formatBytes(progress.current)} / {formatBytes(progress.total)}
-              </>
-            ) : (
-              <>
-                {progress.current} / {progress.total}
-              </>
-            )}
+            {progress.total !== undefined ? (
+              progress.phase.split("-")[1] === "download" ||
+              progress.phase === "online-patch" ? (
+                <>
+                  {formatBytes(progress.current)} / {formatBytes(progress.total)}
+                </>
+              ) : (
+                <>
+                  {progress.current} / {progress.total}
+                </>
+              )
+            ) : progress.phase === "online-patch" ? (
+              <>{formatBytes(progress.current)}</>
+            ) : null}
           </div>
         )}
       </div>

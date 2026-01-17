@@ -105,7 +105,7 @@ const Launcher: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
         </div>
         <div className="flex flex-row gap-4">
           <div className="w-40 h-20 bg-white/10 rounded-lg shadow-inner flex flex-col justify-end p-2">
-            <div className="text-xs text-white">Butter Launcher 1.0.3</div>
+            <div className="text-xs text-white">Butter Launcher 1.0.4</div>
             <div className="text-[10px] text-gray-300">
               The launcher is in Alpha phase, so it may have bugs; we are
               improving its functionality.
@@ -114,8 +114,7 @@ const Launcher: React.FC<{ onLogout?: () => void }> = ({ onLogout }) => {
           <div className="w-40 h-20 bg-white/10 rounded-lg shadow-inner flex flex-col justify-end p-2">
             <div className="text-xs text-white">CONNECT AND CREATE</div>
             <div className="text-[10px] text-gray-300">
-              Join the largest non-premium Hytale community. Forge your own
-              destiny.
+              Join the largest non-premium Hytale community. https://discord.gg/fZgjHwv5pA
             </div>
           </div>
           <div className="w-40 h-20 bg-white/10 rounded-lg shadow-inner flex flex-col justify-end p-2">

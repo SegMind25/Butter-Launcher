@@ -9,8 +9,12 @@ import extract from "extract-zip";
 import { installButler } from "./butler";
 import { installJRE } from "./jre";
 import { checkGameInstallation } from "./check";
+import { readInstalledManifest, writeInstalledManifest } from "./manifest";
+import { patchOnlineClientIfNeeded } from "./onlinePatch";
 
 const pipeline = promisify(stream.pipeline);
+
+// manifest helpers live in ./manifest
 
 const downloadPWR = async (
   gameDir: string,
@@ -238,6 +242,10 @@ export const installGame = async (
   try {
     const { client, server, jre } = checkGameInstallation(gameDir, version);
 
+    const installedManifest = readInstalledManifest(gameDir, version.type);
+    const alreadyOnThisBuild =
+      installedManifest?.build_index === version.build_index;
+
     fs.mkdirSync(gameDir, { recursive: true });
     win.webContents.send("install-started");
 
@@ -246,7 +254,9 @@ export const installGame = async (
       if (!jrePath) return;
     }
 
-    if (!client || !server) {
+    // If binaries exist but build differs, we must still apply the new PWR.
+    // Only skip the patching step when we *know* we're already on this build.
+    if (!alreadyOnThisBuild) {
       const butlerPath = await installButler();
       if (!butlerPath) return;
 
@@ -268,6 +278,39 @@ export const installGame = async (
 
       const applyFixResult = await applyFix(gameFinalDir, version, win);
       if (applyFixResult === false) return;
+
+      // Record the installed build so future updates can detect when patching is needed.
+      writeInstalledManifest(gameDir, version);
+
+      // Apply online client patch (if url+hash exists for this build).
+      await patchOnlineClientIfNeeded(gameDir, version, win, "install-progress");
+    } else {
+      // If the manifest says it's installed, but binaries are missing, fall back to patching.
+      // This keeps us safe against partial installs.
+      if (!client || !server) {
+        const butlerPath = await installButler();
+        if (!butlerPath) return;
+
+        const tempPWRPath = await downloadPWR(gameDir, version, win);
+        if (!tempPWRPath) return;
+
+        const gameFinalDir = await applyPWR(
+          tempPWRPath,
+          butlerPath,
+          gameDir,
+          version,
+          win,
+        );
+        if (!gameFinalDir) throw new Error("Failed to apply PWR");
+        fs.unlinkSync(tempPWRPath);
+
+        const applyFixResult = await applyFix(gameFinalDir, version, win);
+        if (applyFixResult === false) return;
+
+        writeInstalledManifest(gameDir, version);
+
+        await patchOnlineClientIfNeeded(gameDir, version, win, "install-progress");
+      }
     }
     console.log("Game installed successfully");
 

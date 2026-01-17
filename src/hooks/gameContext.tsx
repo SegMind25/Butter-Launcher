@@ -17,6 +17,8 @@ interface GameContextType {
   selectedVersion: number;
   installing: boolean;
   installProgress: InstallProgress;
+  patchingOnline: boolean;
+  patchProgress: InstallProgress;
   launching: boolean;
   gameLaunched: boolean;
   installGame: (version: GameVersion) => void;
@@ -41,6 +43,12 @@ export const GameContextProvider = ({
     total: 0,
     current: 0,
   });
+  const [patchingOnline, setPatchingOnline] = useState(false);
+  const [patchProgress, setPatchProgress] = useState<InstallProgress>({
+    phase: "online-patch",
+    percent: -1,
+  });
+  const [onlinePatchInFlight, setOnlinePatchInFlight] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [gameLaunched, setGameLaunched] = useState(false);
 
@@ -58,7 +66,10 @@ export const GameContextProvider = ({
       if (!gameDir || !version.installed) return;
       setLaunching(true);
 
-      window.ipcRenderer.send("launch-game", gameDir, version, username);
+      const customUUID = (localStorage.getItem("customUUID") || "").trim();
+      const uuidArg = customUUID.length ? customUUID : null;
+
+      window.ipcRenderer.send("launch-game", gameDir, version, username, uuidArg);
       window.ipcRenderer.once("launched", () => {
         setLaunching(false);
         setGameLaunched(true);
@@ -79,13 +90,33 @@ export const GameContextProvider = ({
     const local = getInstalledGameVersions();
     setAvailableVersions(local); // set available from installed while loading remote
 
-    let remote = await getGameVersions();
+    let remote = await getGameVersions("release");
     if (remote.length === 0) return;
 
-    remote = remote.map((version) => {
-      const installed = local.find(
-        (v) => v.build_index === version.build_index
+    let installedBuild: number | null = null;
+    if (gameDir) {
+      installedBuild = await window.ipcRenderer.invoke(
+        "get-installed-build",
+        gameDir,
+        "release"
       );
+    }
+
+    // If there is no manifest yet (old installs), fall back to localStorage "installedVersions"
+    // and treat the max build_index as the currently installed build.
+    if (installedBuild == null && local.length) {
+      const maxLocal = Math.max(
+        ...local
+          .filter((v) => v.type === "release")
+          .map((v) => v.build_index)
+      );
+      if (Number.isFinite(maxLocal) && maxLocal > 0) installedBuild = maxLocal;
+    }
+
+    remote = remote.map((version) => {
+      const installed =
+        typeof installedBuild === "number" &&
+        version.build_index === installedBuild;
       return {
         ...version,
         installed: !!installed,
@@ -121,6 +152,25 @@ export const GameContextProvider = ({
       lastProgressRef.current = progress;
       setInstallProgress(progress);
     });
+
+    // Online client patch (startup) progress
+    // Only show patching UI when a download actually starts (progress events).
+    window.ipcRenderer.on(
+      "online-patch-progress",
+      (_, progress: InstallProgress) => {
+        setPatchingOnline(true);
+        setPatchProgress(progress);
+      }
+    );
+    window.ipcRenderer.on("online-patch-finished", () => {
+      setPatchingOnline(false);
+      setOnlinePatchInFlight(false);
+    });
+    window.ipcRenderer.on("online-patch-error", (_, error: string) => {
+      setPatchingOnline(false);
+      setOnlinePatchInFlight(false);
+      console.error("Online patch error:", error);
+    });
     window.ipcRenderer.on("install-started", () => {
       setInstalling(true);
     });
@@ -128,13 +178,14 @@ export const GameContextProvider = ({
       setInstalling(false);
       saveInstalledGameVersion(version);
 
-      // Update in-memory list so the UI immediately switches from "Install" to "Play".
+      // Update in-memory list so the UI immediately switches from "Install/Update" to "Play".
+      // Only one build per channel is considered installed (the currently applied one).
       setAvailableVersions((prev) => {
-        const next = prev.map((v) =>
-          v.build_index === version.build_index && v.type === version.type
-            ? { ...v, installed: true }
-            : v
-        );
+        const next = prev.map((v) => {
+          if (v.type !== version.type) return v;
+          const isInstalled = v.build_index === version.build_index;
+          return { ...v, installed: isInstalled };
+        });
 
         const idx = next.findIndex(
           (v) => v.build_index === version.build_index && v.type === version.type
@@ -155,28 +206,39 @@ export const GameContextProvider = ({
 
       setGameDir(defaultGameDirectory);
     })();
-
-    getAvailableVersions();
   }, []);
+
+  useEffect(() => {
+    if (!gameDir) return;
+    getAvailableVersions();
+  }, [gameDir]);
+
+  // On launcher open (and whenever the installed build changes), verify the online client patch.
+  useEffect(() => {
+    if (!gameDir) return;
+    if (installing) return;
+
+    const installed = availableVersions.find((v) => v.installed);
+    if (!installed) return;
+    if (!installed.patch_url || !installed.patch_hash) return;
+    if (onlinePatchInFlight) return;
+
+    setOnlinePatchInFlight(true);
+    window.ipcRenderer.send("online-patch", gameDir, installed);
+  }, [gameDir, availableVersions, installing, onlinePatchInFlight]);
 
   useEffect(() => {
     if (!availableVersions.length) return;
     console.log("availableVersions", availableVersions);
 
-    // Persist selection by build_index, but keep state as an array index.
-    const storedBuildIndex = localStorage.getItem("selectedVersionBuildIndex");
-    if (storedBuildIndex) {
-      const parsed = parseInt(storedBuildIndex, 10);
-      if (!Number.isNaN(parsed)) {
-        const found = availableVersions.findIndex((v) => v.build_index === parsed);
-        if (found !== -1) {
-          setSelectedVersion(found);
-          return;
-        }
-      }
+    // Prefer selecting the currently installed build if one exists.
+    const installedIdx = availableVersions.findIndex((v) => v.installed);
+    if (installedIdx !== -1) {
+      setSelectedVersion(installedIdx);
+      return;
     }
 
-    // Default to latest (last in the list)
+    // Otherwise default to latest (last in the list)
     setSelectedVersion(availableVersions.length - 1);
   }, [availableVersions]);
 
@@ -195,6 +257,8 @@ export const GameContextProvider = ({
         selectedVersion,
         installing,
         installProgress,
+        patchingOnline,
+        patchProgress,
         launching,
         gameLaunched,
         installGame,

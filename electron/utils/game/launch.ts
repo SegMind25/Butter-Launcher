@@ -11,7 +11,8 @@ export const launchGame = async (
   version: GameVersion,
   username: string,
   win: BrowserWindow,
-  retryCount: number = 0
+  retryCount: number = 0,
+  customUUID: string | null = null
 ) => {
   if (retryCount > 1) {
     console.error("Failed to launch game, maximum retry count reached");
@@ -34,6 +35,25 @@ export const launchGame = async (
   const userDir = join(baseDir, "UserData");
   if (!fs.existsSync(userDir)) fs.mkdirSync(userDir);
 
+  const normalizeUuid = (raw: string): string | null => {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+
+    const compact = trimmed.replace(/-/g, "");
+    if (/^[0-9a-fA-F]{32}$/.test(compact)) {
+      const lower = compact.toLowerCase();
+      return `${lower.slice(0, 8)}-${lower.slice(8, 12)}-${lower.slice(12, 16)}-${lower.slice(16, 20)}-${lower.slice(20)}`;
+    }
+
+    if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(trimmed)) {
+      return trimmed.toLowerCase();
+    }
+
+    return null;
+  };
+
+  const uuidToUse = customUUID ? normalizeUuid(customUUID) : null;
+
   const args = [
     "--app-dir",
     join(dirname(client), ".."),
@@ -43,7 +63,7 @@ export const launchGame = async (
     jre,
     "--auth-mode offline",
     "--uuid",
-    genUUID(username),
+    uuidToUse ?? genUUID(username),
     "--name",
     username,
   ];

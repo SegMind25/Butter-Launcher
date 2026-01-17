@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { FolderOpen } from "lucide-react";
 import { useGameContext } from "../hooks/gameContext";
 
@@ -8,6 +8,24 @@ const SettingsModal: React.FC<{
   onLogout?: () => void;
 }> = ({ open, onClose, onLogout }) => {
   const { gameDir } = useGameContext();
+  const [customUUID, setCustomUUID] = useState<string>("");
+
+  const normalizedUUID = useMemo(() => {
+    const raw = customUUID.trim();
+    if (!raw) return "";
+
+    const compact = raw.replace(/-/g, "");
+    if (/^[0-9a-fA-F]{32}$/.test(compact)) {
+      const lower = compact.toLowerCase();
+      return `${lower.slice(0, 8)}-${lower.slice(8, 12)}-${lower.slice(12, 16)}-${lower.slice(16, 20)}-${lower.slice(20)}`;
+    }
+
+    if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(raw)) {
+      return raw.toLowerCase();
+    }
+
+    return "__invalid__";
+  }, [customUUID]);
 
   const handleOpenGameDir = async () => {
     try {
@@ -18,6 +36,25 @@ const SettingsModal: React.FC<{
       alert("Failed to open game directory");
     }
   };
+
+  useEffect(() => {
+    if (!open) return;
+    const stored = localStorage.getItem("customUUID") || "";
+    setCustomUUID(stored);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const raw = customUUID.trim();
+    if (!raw) {
+      localStorage.removeItem("customUUID");
+      return;
+    }
+
+    if (normalizedUUID && normalizedUUID !== "__invalid__") {
+      localStorage.setItem("customUUID", normalizedUUID);
+    }
+  }, [customUUID, normalizedUUID, open]);
 
   if (!open) return null;
   return (
@@ -60,7 +97,42 @@ const SettingsModal: React.FC<{
               Launcher Version
             </label>
             <div className="text-xs text-gray-400 font-mono">
-              ButterLauncher_2026.01.16
+              ButterLauncher_2026.01.17 V1.0.4
+            </div>
+          </div>
+
+          <div>
+            <label className="text-gray-200 text-sm font-semibold mb-1 block">
+              Custom UUID
+            </label>
+            <input
+              value={customUUID}
+              onChange={(e) => setCustomUUID(e.target.value)}
+              placeholder="Leave empty for auto"
+              className="w-full mt-1 px-3 py-2 rounded bg-[#23293a] text-white border border-[#3b82f6] focus:outline-none"
+              spellCheck={false}
+              autoCapitalize="none"
+              autoCorrect="off"
+              inputMode="text"
+            />
+            <div className="flex items-center justify-between mt-1">
+              <div className="text-[10px] text-gray-400">
+                {customUUID.trim().length === 0
+                  ? "Uses auto UUID generation"
+                  : normalizedUUID === "__invalid__"
+                    ? "Invalid UUID (use 32 hex or UUID format)"
+                    : `Saved: ${normalizedUUID}`}
+              </div>
+              <button
+                type="button"
+                className="text-[10px] text-red-300 hover:text-red-200"
+                onClick={() => {
+                  setCustomUUID("");
+                  localStorage.removeItem("customUUID");
+                }}
+              >
+                Clear
+              </button>
             </div>
           </div>
           {/* <div>

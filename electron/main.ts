@@ -9,6 +9,8 @@ import { installGame } from "./utils/game/install";
 import { checkGameInstallation } from "./utils/game/check";
 import { launchGame } from "./utils/game/launch";
 import { connectRPC } from "./utils/discord";
+import { readInstalledManifest } from "./utils/game/manifest";
+import { patchOnlineClientIfNeeded } from "./utils/game/onlinePatch";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -160,6 +162,14 @@ ipcMain.handle(
   }
 );
 
+ipcMain.handle(
+  "get-installed-build",
+  (_, baseDir: string, versionType: GameVersion["type"]) => {
+    const manifest = readInstalledManifest(baseDir, versionType);
+    return manifest?.build_index ?? null;
+  }
+);
+
 ipcMain.on("install-game", (e, gameDir: string, version: GameVersion) => {
   if (!fs.existsSync(gameDir)) {
     fs.mkdirSync(gameDir, { recursive: true });
@@ -173,10 +183,33 @@ ipcMain.on("install-game", (e, gameDir: string, version: GameVersion) => {
 
 ipcMain.on(
   "launch-game",
-  (e, gameDir: string, version: GameVersion, username: string) => {
+  (e, gameDir: string, version: GameVersion, username: string, customUUID?: string | null) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     if (win) {
-      launchGame(gameDir, version, username, win);
+      launchGame(gameDir, version, username, win, 0, customUUID ?? null);
     }
   }
 );
+
+ipcMain.on("online-patch", async (e, gameDir: string, version: GameVersion) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win) return;
+
+  // Important: do NOT emit a "started" UI event here.
+  // We only want to show the patching UI when a download actually begins.
+  try {
+    const result = await patchOnlineClientIfNeeded(
+      gameDir,
+      version,
+      win,
+      "online-patch-progress"
+    );
+    win.webContents.send("online-patch-finished", result);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    win.webContents.send("online-patch-error", msg);
+  } finally {
+    // Ensure the renderer can always clear any in-flight state.
+    win.webContents.send("online-patch-finished", "error");
+  }
+});

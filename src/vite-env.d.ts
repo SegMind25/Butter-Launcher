@@ -7,6 +7,8 @@ type GameVersion = {
   type: VersionType;
   build_index: number;
   build_name: string;
+  patch_url?: string;
+  patch_hash?: string;
   hasFix?: boolean;
   fixURL?: string;
   installed?: boolean;
@@ -14,6 +16,8 @@ type GameVersion = {
 
 type VersionDetails = {
   name: string;
+  url?: string;
+  hash?: string;
 };
 
 type VersionDetailsRoot = {

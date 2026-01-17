@@ -81,7 +81,7 @@ const Login: React.FC<{ onLogin: (username: string) => void }> = ({ onLogin }) =
         </p>
 
         <div className="absolute bottom-6 left-10 text-xs text-gray-500">
-          release/2026.01.13-b6c7e88
+          ButterLauncher_2026.01.17 V1.0.4
         </div>
       </div>
 
