@@ -1,7 +1,7 @@
 {
   "name": "butter-launcher",
   "description": "The best Hytale Launcher",
-  "author": "vZyle",
+  "author": "vZyle <vZyle@example.com>",
   "private": false,
   "version": "1.0.3",
   "type": "module",
