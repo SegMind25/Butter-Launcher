@@ -25,7 +25,7 @@
 
 ## 🧈 About
 
-**Butter Launcher** is a modern, lightweight launcher for Hytale built with **Electron, React, and Vite**. 
+**Butter Launcher** is a modern, launcher for Hytale built with **Electron, React, and Vite**. 
 
 Created after the game's release in early 2026, Butter Launcher aims to provide features that the official launcher lacks, giving power back to the players. We prioritize performance and flexibility.
 
