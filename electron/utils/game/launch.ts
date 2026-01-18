@@ -25,7 +25,11 @@ export const launchGame = async (
   username: string,
   win: BrowserWindow,
   retryCount: number = 0,
-  customUUID: string | null = null
+  customUUID: string | null = null,
+  callbacks?: {
+    onGameSpawned?: () => void;
+    onGameExited?: (info: { code: number | null; signal: NodeJS.Signals | null }) => void;
+  }
 ) => {
   if (retryCount > 1) {
     const msg = "Failed to launch game (max retries reached)";
@@ -39,12 +43,20 @@ export const launchGame = async (
     console.log("Game not installed, missing:", { client, server, jre });
     const installResult = await installGame(baseDir, version, win);
     if (!installResult) {
-      console.error("Game installation failed, retrying...");
-      launchGame(baseDir, version, username, win, retryCount + 1, customUUID);
-    } else {
-      launchGame(baseDir, version, username, win, retryCount, customUUID);
+      const msg = "Game installation failed";
+      console.error(msg);
+      win.webContents.send("launch-error", msg);
+      return;
     }
-    return;
+
+    // Re-check after install.
+    ({ client, server, jre } = checkGameInstallation(baseDir, version));
+    if (!client || !server || !jre) {
+      const msg = "Game installation incomplete (missing files after install)";
+      console.error(msg, { client, server, jre });
+      win.webContents.send("launch-error", msg);
+      return;
+    }
   }
 
   const userDir = join(baseDir, "UserData");
@@ -90,9 +102,18 @@ export const launchGame = async (
         windowsHide: true,
         shell: false,
         cwd: dirname(client),
+        // Critical for Windows: allow the launcher to quit without killing the game.
+        // `stdio: "ignore"` + `unref()` prevents the child being tied to the parent lifetime.
+        detached: process.platform !== "darwin",
+        stdio: "ignore",
       });
 
+      // Ensure the child is not keeping the parent process alive, and (on Windows)
+      // is less likely to be terminated when the Electron app exits.
+      child.unref();
+
       child.on("spawn", () => {
+        callbacks?.onGameSpawned?.();
         win.webContents.send("launched");
       });
 
@@ -109,14 +130,27 @@ export const launchGame = async (
         win.webContents.send("launch-error", error.message);
       });
 
-      child.on("close", (code, signal) => {
+      let finished = false;
+      const onFinish = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (finished) return;
+        finished = true;
+
         if (code && code !== 0) {
           console.error(
             `Game exited with code ${code}${signal ? ` (signal ${signal})` : ""}`,
           );
         }
-        win.webContents.send("launch-finished", { code, signal });
-      });
+        callbacks?.onGameExited?.({ code, signal });
+        try {
+          win.webContents.send("launch-finished", { code, signal });
+        } catch {
+          // Window/app may already be closing.
+        }
+      };
+
+      // Prefer exit for detached children; keep close as a fallback.
+      child.once("exit", onFinish);
+      child.once("close", onFinish);
     } catch (error) {
       const msg = error instanceof Error ? error.message : "Unknown error";
       console.error(`Error launching game: ${msg}`);

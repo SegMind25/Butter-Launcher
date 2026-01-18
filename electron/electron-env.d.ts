@@ -26,7 +26,9 @@ interface Window {
   ipcRenderer: import("electron").IpcRenderer;
   config: {
     OS: NodeJS.Platform;
+    ARCH: NodeJS.Architecture;
     getDefaultGameDirectory: () => Promise<string>;
     openFolder: (folderPath: string) => Promise<{ ok: boolean; error: string | null }>;
+    openExternal: (url: string) => Promise<{ ok: boolean; error: string | null }>;
   };
 }

@@ -39,7 +39,7 @@ export default function ProgressBar({ progress, className }: Props) {
                   {progress.current} / {progress.total}
                 </>
               )
-            ) : progress.phase === "online-patch" ? (
+            ) : progress.phase.split("-")[1] === "download" || progress.phase === "online-patch" ? (
               <>{formatBytes(progress.current)}</>
             ) : null}
           </div>

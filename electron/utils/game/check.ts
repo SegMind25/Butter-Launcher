@@ -1,26 +1,17 @@
 import fs from "fs";
 import path from "path";
+import { migrateLegacyChannelInstallIfNeeded, resolveClientPath, resolveExistingInstallDir, resolveServerPath } from "./paths";
 
 export function checkGameInstallation(gameDir: string, version: GameVersion) {
   const os = process.platform;
-
-  const clientName = os === "win32" ? "HytaleClient.exe" : "HytaleClient";
   const jreName = os === "win32" ? "java.exe" : "java";
 
-  const clientPath = path.join(
-    gameDir,
-    "game",
-    version.type,
-    "Client",
-    clientName
-  );
-  const serverPath = path.join(
-    gameDir,
-    "game",
-    version.type,
-    "Server",
-    "HytaleServer.jar"
-  );
+  // Best-effort migration for legacy installs that were written to game/<type>/Client.
+  migrateLegacyChannelInstallIfNeeded(gameDir, version.type);
+
+  const installDir = resolveExistingInstallDir(gameDir, version);
+  const clientPath = resolveClientPath(installDir);
+  const serverPath = resolveServerPath(installDir);
   const jrePath = path.join(gameDir, "jre", "bin", jreName);
 
   const client = fs.existsSync(clientPath);

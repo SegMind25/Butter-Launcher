@@ -1,5 +1,9 @@
 /// <reference types="vite/client" />
 
+interface ImportMetaEnv {
+  readonly VITE_NEWS_URL?: string;
+}
+
 type VersionType = "release" | "pre-release";
 
 type GameVersion = {
@@ -7,8 +11,11 @@ type GameVersion = {
   type: VersionType;
   build_index: number;
   build_name: string;
+  isLatest?: boolean;
   patch_url?: string;
   patch_hash?: string;
+  original_url?: string;
+  patch_note?: string;
   hasFix?: boolean;
   fixURL?: string;
   installed?: boolean;
@@ -17,7 +24,9 @@ type GameVersion = {
 type VersionDetails = {
   name: string;
   url?: string;
+  original?: string;
   hash?: string;
+  patch_note?: string;
 };
 
 type VersionDetailsRoot = {

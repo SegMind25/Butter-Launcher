@@ -6,7 +6,7 @@
 
 <p align="center">
   <b>Experience Hytale without boundaries.</b> <br>
-  The open launcher designed for everyone: seamless offline play, multiple instances, and total freedom.
+  The open launcher designed for everyone: seamless no-premium online play, multiple instances, and total freedom.
 </p>
 
 <p align="center">
@@ -52,7 +52,7 @@ Grab the latest executable for your operating system from our **[Releases Page](
 | OS | Format | Status |
 | :--- | :--- | :--- |
 | **Windows** | `.exe` / `.msi` | ✅ Stable |
-| **Linux** | `.AppImage` / `.deb` | ✅ Stable |
+| **Linux** | `.AppImage` / `.flatpak` | 🚧 Experimental |
 | **macOS** | `.dmg` | 🚧 Experimental |
  
 ## 🛠️ Development

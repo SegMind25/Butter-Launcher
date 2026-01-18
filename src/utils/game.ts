@@ -20,6 +20,7 @@ const useSystemOS = () => {
 };
 
 const useSystemArch = (os: string) => {
+  // Hytale patch endpoints currently only provide darwin/arm64.
   if (os === "darwin") return "arm64";
   return "amd64";
 };
@@ -164,6 +165,18 @@ const probeBeyondLatest = async (
   return found;
 };
 
+const probeFromBuild1 = async (
+  versionType: VersionType,
+  maxScan: number,
+): Promise<number[]> => {
+  const found: number[] = [];
+  for (let buildIndex = 1; buildIndex <= maxScan; buildIndex++) {
+    const ok = await headPwrExists(versionType, buildIndex);
+    if (!ok) break;
+    found.push(buildIndex);
+  }
+  return found;
+};
 export const getGameVersions = async (versionType: VersionType = "release") => {
   // 1) Fetch the official versions list (your provided API format). If offline, use cache.
   const today = startOfToday();
@@ -173,9 +186,55 @@ export const getGameVersions = async (versionType: VersionType = "release") => {
     saveCachedVersionDetails(details, { fetchedAt: formatYMD(today) });
   }
 
-  if (!details) return [];
+  // Fallback: if the versions list is unavailable/incompatible (maintenance, schema change, etc)
+  // probe PWRs from build-1 upwards so new users still see installable builds.
+  if (!details) {
+    const os = useSystemOS();
+    const arch = useSystemArch(os);
 
-  const listDate = parseISODateOnly(details.last_updated);
+    const maxScan = 200; // safety cap
+    const ids = await probeFromBuild1(versionType, maxScan);
+    if (!ids.length) return [];
+
+    const versions: GameVersion[] = ids.map((buildIndex) => ({
+      url: buildPwrUrl(os, arch, versionType, buildIndex),
+      type: versionType,
+      build_index: buildIndex,
+      build_name: `Build-${buildIndex}`,
+      isLatest: false,
+    }));
+
+    const actualLatest = Math.max(...versions.map((v) => v.build_index));
+    for (const v of versions) v.isLatest = v.build_index === actualLatest;
+
+    versions.sort((a, b) => b.build_index - a.build_index);
+
+    // Best-effort: apply fix metadata if available.
+    try {
+      const fix: FixVersions = await window.ipcRenderer.invoke(
+        "fetch:json",
+        `${import.meta.env.VITE_DOWNLOADS_API_URL}/online/versions.json`
+      );
+
+      if (fix[os]) {
+        for (const v of versions) {
+          const versionFix = fix[os].find((x) =>
+            semver.satisfies(v.build_index.toString(), x.range)
+          );
+          if (versionFix) {
+            v.hasFix = true;
+            v.fixURL = `${import.meta.env.VITE_DOWNLOADS_API_URL}/online/${os}/${versionFix.path}`;
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    return versions;
+  }
+
+  parseISODateOnly(details.last_updated);
   const latestId =
     versionType === "release"
       ? details.latest_release_id
@@ -203,13 +262,9 @@ export const getGameVersions = async (versionType: VersionType = "release") => {
     if (ok) existingListed.push(id);
   }
 
-  // 4) If list is older than today, probe latest+1, latest+2, ... until it stops being 200.
-  const shouldProbe =
-    typeof latestId === "number" &&
-    latestId > 0 &&
-    !!listDate &&
-    listDate < today;
-
+  // 4) Probe latest+1, latest+2, ... until it stops being 200.
+  // This catches new builds even when the versions list hasn't updated yet.
+  const shouldProbe = typeof latestId === "number" && latestId > 0;
   const maxExtra = 50; // safety cap
   const extras = shouldProbe
     ? await probeBeyondLatest(versionType, latestId + 1, maxExtra)
@@ -225,22 +280,43 @@ export const getGameVersions = async (versionType: VersionType = "release") => {
   const versions: GameVersion[] = finalIds.map((buildIndex) => {
     const detailsEntry = namesMap?.[buildIndex.toString()];
     const listedName = detailsEntry?.name;
-    const build_name = listedName || `build-${buildIndex}`;
+    const build_name =
+      typeof listedName === "string" && listedName.trim().length > 0
+        ? listedName
+        : `Build-${buildIndex}`;
 
     const patch_url =
       typeof (detailsEntry as any)?.url === "string" ? (detailsEntry as any).url : undefined;
+    const original_url =
+      typeof (detailsEntry as any)?.original === "string" ? (detailsEntry as any).original : undefined;
     const patch_hash =
       typeof (detailsEntry as any)?.hash === "string" ? (detailsEntry as any).hash : undefined;
+    const patch_note =
+      typeof (detailsEntry as any)?.patch_note === "string" ? (detailsEntry as any).patch_note : undefined;
 
     return {
       url: buildPwrUrl(os, arch, versionType, buildIndex),
       type: versionType,
       build_index: buildIndex,
       build_name,
+      isLatest: false,
       patch_url: patch_url && patch_hash ? patch_url : undefined,
       patch_hash: patch_url && patch_hash ? patch_hash : undefined,
+      original_url: patch_url && patch_hash ? original_url : undefined,
+      patch_note: patch_url && patch_hash ? patch_note : undefined,
     };
   });
+
+  // Mark the actual latest build based on what exists (includes probeBeyondLatest).
+  if (versions.length) {
+    const actualLatest = Math.max(...versions.map((v) => v.build_index));
+    for (const v of versions) {
+      v.isLatest = v.build_index === actualLatest;
+    }
+  }
+
+  // Newest first in UI.
+  versions.sort((a, b) => b.build_index - a.build_index);
 
   // get version fix (same behavior as before, but apply to all returned versions)
   const fix: FixVersions = await window.ipcRenderer.invoke(

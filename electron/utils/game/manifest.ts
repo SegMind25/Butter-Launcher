@@ -10,17 +10,9 @@ export type InstalledManifest = {
   updated_at: string;
 };
 
-export const readInstalledManifest = (
-  gameDir: string,
-  versionType: GameVersion["type"],
-): InstalledManifest | null => {
+export const readInstallManifest = (installDir: string): InstalledManifest | null => {
   try {
-    const manifestPath = path.join(
-      gameDir,
-      "game",
-      versionType,
-      INSTALLED_MANIFEST_FILENAME,
-    );
+    const manifestPath = path.join(installDir, INSTALLED_MANIFEST_FILENAME);
     if (!fs.existsSync(manifestPath)) return null;
     const raw = fs.readFileSync(manifestPath, "utf-8");
     const json = JSON.parse(raw) as InstalledManifest;
@@ -31,15 +23,14 @@ export const readInstalledManifest = (
   }
 };
 
-export const writeInstalledManifest = (
-  gameDir: string,
-  version: GameVersion,
+export const writeInstallManifest = (
+  installDir: string,
+  version: Pick<GameVersion, "build_index" | "type"> & { build_name?: string },
 ): boolean => {
   try {
-    const targetDir = path.join(gameDir, "game", version.type);
-    if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+    if (!fs.existsSync(installDir)) fs.mkdirSync(installDir, { recursive: true });
 
-    const manifestPath = path.join(targetDir, INSTALLED_MANIFEST_FILENAME);
+    const manifestPath = path.join(installDir, INSTALLED_MANIFEST_FILENAME);
     const payload: InstalledManifest = {
       build_index: version.build_index,
       type: version.type,

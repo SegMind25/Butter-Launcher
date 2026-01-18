@@ -84,22 +84,33 @@ export const installJRE = async (gameDir: string, win: BrowserWindow) => {
     const resFile = await fetch(downloadUrl);
     if (!resFile.ok) throw new Error("Failed to download JRE");
     const contentLength = resFile.headers.get("content-length");
-    const totalLength = contentLength ? parseInt(contentLength, 10) : 0;
+    const totalLength = contentLength ? parseInt(contentLength, 10) : undefined;
     let downloadedLength = 0;
+
+    win.webContents.send("install-progress", {
+      phase: "jre-download",
+      percent: typeof totalLength === "number" && totalLength > 0 ? 0 : -1,
+      total: totalLength,
+      current: 0,
+    });
 
     const progressStream = new stream.PassThrough();
     progressStream.on("data", (chunk) => {
       downloadedLength += chunk.length;
-      if (totalLength > 0) {
-        const percentage =
-          (downloadedLength / totalLength) * (os === "win32" ? 80 : 100);
-        win.webContents.send("install-progress", {
-          phase: "jre-download",
-          percent: Math.round(percentage),
-          total: totalLength,
-          current: downloadedLength,
-        });
-      }
+
+      const percent =
+        typeof totalLength === "number" && totalLength > 0
+          ? Math.round(
+              (downloadedLength / totalLength) * (os === "win32" ? 80 : 100),
+            )
+          : -1;
+
+      win.webContents.send("install-progress", {
+        phase: "jre-download",
+        percent,
+        total: totalLength,
+        current: downloadedLength,
+      });
     });
 
     await pipeline(

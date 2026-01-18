@@ -4,12 +4,27 @@ import crypto from "node:crypto";
 import stream from "node:stream";
 import { promisify } from "util";
 import { BrowserWindow } from "electron";
+import { migrateLegacyChannelInstallIfNeeded, resolveClientPath, resolveExistingInstallDir } from "./paths";
 
 const pipeline = promisify(stream.pipeline);
 
 const FETCH_TIMEOUT_MS = 45_000;
 
+const PATCH_ROOT_DIRNAME = ".butter-online-patch";
+const PATCH_STATE_FILENAME = "state.json";
+
 const normalizeHash = (h: string) => h.trim().toUpperCase();
+
+const withCacheBuster = (url: string, cacheKey: string) => {
+  try {
+    const u = new URL(url);
+    u.searchParams.set("cb", cacheKey);
+    return u.toString();
+  } catch {
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}cb=${encodeURIComponent(cacheKey)}`;
+  }
+};
 
 const sha256File = (filePath: string): Promise<string> => {
   return new Promise((resolve, reject) => {
@@ -22,16 +37,115 @@ const sha256File = (filePath: string): Promise<string> => {
 };
 
 const getClientPath = (gameDir: string, version: GameVersion) => {
-  const os = process.platform;
-  const clientName = os === "win32" ? "HytaleClient.exe" : "HytaleClient";
-  return path.join(gameDir, "game", version.type, "Client", clientName);
+  migrateLegacyChannelInstallIfNeeded(gameDir, version.type);
+  const installDir = resolveExistingInstallDir(gameDir, version);
+  return resolveClientPath(installDir);
+};
+
+const getPatchPaths = (clientPath: string) => {
+  const clientDir = path.dirname(clientPath);
+  const exeName = path.basename(clientPath);
+
+  const root = path.join(clientDir, PATCH_ROOT_DIRNAME);
+  const originalDir = path.join(root, "original");
+  const patchedDir = path.join(root, "patched");
+
+  const originalPath = path.join(originalDir, exeName);
+  const patchedPath = path.join(patchedDir, exeName);
+  const statePath = path.join(root, PATCH_STATE_FILENAME);
+  const tempDownloadPath = path.join(root, `temp_patch_download_${Date.now()}_${exeName}`);
+
+  return {
+    root,
+    originalDir,
+    patchedDir,
+    originalPath,
+    patchedPath,
+    statePath,
+    tempDownloadPath,
+  };
+};
+
+const ensureDirs = (dirs: string[]) => {
+  for (const d of dirs) {
+    if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true });
+  }
+};
+
+const moveReplace = (from: string, to: string) => {
+  ensureDirs([path.dirname(to)]);
+
+  try {
+    if (fs.existsSync(to)) fs.unlinkSync(to);
+  } catch {
+    // ignore
+  }
+
+  try {
+    fs.renameSync(from, to);
+    return;
+  } catch {
+    // Fallback to copy+remove (cross-device / locked edge cases)
+    fs.copyFileSync(from, to);
+    try {
+      fs.unlinkSync(from);
+    } catch {
+      // ignore
+    }
+  }
+};
+
+const unlinkIfExists = (filePath: string) => {
+  try {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+  } catch {
+    // ignore
+  }
+};
+
+const copyReplace = (from: string, to: string) => {
+  ensureDirs([path.dirname(to)]);
+  unlinkIfExists(to);
+  fs.copyFileSync(from, to);
+};
+
+type PatchStateFile = {
+  enabled: boolean;
+  patch_hash?: string;
+  patch_url?: string;
+  original_url?: string;
+  patch_note?: string;
+  updatedAt: number;
+};
+
+const readPatchState = (statePath: string): PatchStateFile | null => {
+  try {
+    if (!fs.existsSync(statePath)) return null;
+    const raw = fs.readFileSync(statePath, "utf8");
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return null;
+    if (typeof parsed.enabled !== "boolean") return null;
+    return parsed as PatchStateFile;
+  } catch {
+    return null;
+  }
+};
+
+const writePatchState = (statePath: string, next: PatchStateFile) => {
+  try {
+    ensureDirs([path.dirname(statePath)]);
+    fs.writeFileSync(statePath, JSON.stringify(next, null, 2), "utf8");
+  } catch {
+    // ignore
+  }
 };
 
 const downloadFileWithProgress = async (
   url: string,
   outPath: string,
   win: BrowserWindow,
-  progressChannel: "install-progress" | "online-patch-progress",
+  progressChannel: "install-progress" | "online-patch-progress" | "online-unpatch-progress",
+  phase: "online-patch" | "online-unpatch" = "online-patch",
 ) => {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -39,8 +153,24 @@ const downloadFileWithProgress = async (
   const response = await fetch(url, { signal: controller.signal }).finally(() => {
     clearTimeout(timeout);
   });
-  if (!response.ok) throw new Error(`Failed to download patch: ${response.status}`);
+
+  if (!response.ok) throw new Error(`Failed to download file (${response.status})`);
   if (!response.body) throw new Error("No response body");
+
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (contentType.includes("text/html") || contentType.includes("application/xhtml+xml")) {
+    let snippet = "";
+    try {
+      snippet = (await response.clone().text()).slice(0, 200);
+    } catch {
+      // ignore
+    }
+
+    throw new Error(
+      `Download returned HTML instead of a binary. This usually means a CDN cache or error page was served. URL: ${url}` +
+        (snippet ? ` (starts with: ${JSON.stringify(snippet)})` : ""),
+    );
+  }
 
   const contentLength = response.headers.get("content-length");
   const totalLength = contentLength ? parseInt(contentLength, 10) : 0;
@@ -56,7 +186,7 @@ const downloadFileWithProgress = async (
         : -1;
 
     win.webContents.send(progressChannel, {
-      phase: "online-patch",
+      phase,
       percent,
       total: totalLength > 0 ? totalLength : undefined,
       current: downloadedLength,
@@ -65,7 +195,7 @@ const downloadFileWithProgress = async (
 
   // Initial state (indeterminate if content-length missing)
   win.webContents.send(progressChannel, {
-    phase: "online-patch",
+    phase,
     percent: totalLength > 0 ? 0 : -1,
     total: totalLength > 0 ? totalLength : undefined,
     current: 0,
@@ -79,80 +209,533 @@ const downloadFileWithProgress = async (
   );
 
   win.webContents.send(progressChannel, {
-    phase: "online-patch",
+    phase,
     percent: 100,
     total: totalLength > 0 ? totalLength : undefined,
     current: downloadedLength,
   });
 };
 
-export const patchOnlineClientIfNeeded = async (
+export const getOnlinePatchState = (
+  gameDir: string,
+  version: GameVersion,
+): {
+  supported: boolean;
+  available: boolean;
+  enabled: boolean;
+  downloaded: boolean;
+} => {
+  const supported = process.platform === "win32";
+  const available = !!(version.patch_url && version.patch_hash);
+  if (!supported || !available) return { supported, available, enabled: false, downloaded: false };
+
+  const clientPath = getClientPath(gameDir, version);
+  if (!fs.existsSync(clientPath)) return { supported, available, enabled: false, downloaded: false };
+
+  const { statePath, patchedPath, originalPath } = getPatchPaths(clientPath);
+  const state = readPatchState(statePath);
+
+  // Derive current on-disk state (can drift if state.json is deleted/corrupted).
+  let clientIsPatched = false;
+  try {
+    const currentHash = crypto.createHash("sha256");
+    const input = fs.createReadStream(clientPath);
+    input.on("data", (chunk) => currentHash.update(chunk));
+    // Synchronous wrapper: getOnlinePatchState is sync, so keep it cheap if hash can't be computed.
+    // If needed, health-check uses the async sha256File path.
+    // eslint-disable-next-line @typescript-eslint/no-empty-function
+    input.on("error", () => {});
+    // Not awaiting; treat as unknown.
+    clientIsPatched = false;
+  } catch {
+    clientIsPatched = false;
+  }
+
+  // If state says "unpatched" but the client is clearly patched and we have patch storage,
+  // treat it as patched (and heal state) to avoid false "Fix Client" and broken disable.
+  let enabled = !!state?.enabled;
+  if (!enabled && clientIsPatched && fs.existsSync(patchedPath)) {
+    enabled = true;
+    writePatchState(statePath, {
+      enabled: true,
+      patch_hash: version.patch_hash,
+      patch_url: version.patch_url,
+      original_url: version.original_url ?? state?.original_url,
+      patch_note: version.patch_note,
+      updatedAt: Date.now(),
+    });
+  }
+
+  // If state is missing, infer from disk.
+  if (!state && clientIsPatched) enabled = true;
+
+  // If we're enabled but missing backups, don't block state (disable can recover via original_url).
+  void originalPath;
+
+  return {
+    supported,
+    available,
+    enabled,
+    downloaded: fs.existsSync(patchedPath),
+  };
+};
+
+export const getOnlinePatchHealth = async (
+  gameDir: string,
+  version: GameVersion,
+): Promise<{
+  supported: boolean;
+  available: boolean;
+  enabled: boolean;
+  clientIsPatched: boolean;
+  needsFixClient: boolean;
+  patchOutdated: boolean;
+}> => {
+  const supported = process.platform === "win32";
+  const available = !!(version.patch_url && version.patch_hash);
+  if (!supported || !available) {
+    return {
+      supported,
+      available,
+      enabled: false,
+      clientIsPatched: false,
+      needsFixClient: false,
+      patchOutdated: false,
+    };
+  }
+
+  const clientPath = getClientPath(gameDir, version);
+  if (!fs.existsSync(clientPath)) {
+    return {
+      supported,
+      available,
+      enabled: false,
+      clientIsPatched: false,
+      needsFixClient: false,
+      patchOutdated: false,
+    };
+  }
+
+  const { statePath, patchedPath } = getPatchPaths(clientPath);
+  const state = readPatchState(statePath);
+
+  // Start with remembered state when present.
+  let enabled = typeof state?.enabled === "boolean" ? state.enabled : false;
+
+  const detectHash = state?.patch_hash || version.patch_hash;
+  let clientIsPatched = false;
+  try {
+    const currentHash = await sha256File(clientPath);
+    clientIsPatched = !!detectHash && normalizeHash(currentHash) === normalizeHash(detectHash);
+  } catch {
+    clientIsPatched = false;
+  }
+
+  // Heal drift: state says unpatched but binary is patched and we have patch storage.
+  if (!enabled && clientIsPatched && fs.existsSync(patchedPath)) {
+    enabled = true;
+    writePatchState(statePath, {
+      enabled: true,
+      patch_hash: detectHash ?? version.patch_hash,
+      patch_url: version.patch_url,
+      original_url: version.original_url ?? state?.original_url,
+      patch_note: version.patch_note,
+      updatedAt: Date.now(),
+    });
+  }
+
+  // If state is missing, infer from disk (avoid false Fix Client on restart).
+  if (!state && clientIsPatched) enabled = true;
+
+  // Show Fix Client only when the launcher explicitly remembers "unpatched" but the file is patched.
+  const needsFixClient = state?.enabled === false && clientIsPatched;
+
+  const patchOutdated =
+    !!enabled &&
+    !!state?.patch_hash &&
+    !!version.patch_hash &&
+    normalizeHash(state.patch_hash) !== normalizeHash(version.patch_hash);
+
+  return { supported, available, enabled, clientIsPatched, needsFixClient, patchOutdated };
+};
+
+export const fixClientToUnpatched = async (
+  gameDir: string,
+  version: GameVersion,
+  win: BrowserWindow,
+  progressChannel: "online-unpatch-progress" = "online-unpatch-progress",
+): Promise<"fixed" | "not-needed" | "skipped"> => {
+  if (process.platform !== "win32") return "skipped";
+
+  const expectedPatchHash = version.patch_hash;
+  if (!expectedPatchHash) return "skipped";
+
+  const clientPath = getClientPath(gameDir, version);
+  if (!fs.existsSync(clientPath)) return "skipped";
+
+  // Only run when current client is actually the patched binary.
+  try {
+    const currentHash = await sha256File(clientPath);
+    const isPatchedNow = normalizeHash(currentHash) === normalizeHash(expectedPatchHash);
+    if (!isPatchedNow) return "not-needed";
+  } catch {
+    return "skipped";
+  }
+
+  const originalUrl = version.original_url;
+  if (!originalUrl) {
+    throw new Error("Missing original_url for this build. Cannot fix client.");
+  }
+
+  const paths = getPatchPaths(clientPath);
+  ensureDirs([paths.root, paths.originalDir, paths.patchedDir]);
+
+  // Download original exe into a temp file.
+  const tempOriginal = path.join(paths.root, `temp_original_${Date.now()}_${path.basename(clientPath)}`);
+  await downloadFileWithProgress(
+    withCacheBuster(originalUrl, `orig-${Date.now()}`),
+    tempOriginal,
+    win,
+    progressChannel,
+    "online-unpatch",
+  );
+
+  // Safety: don't accept a server mistake that returns the patched file.
+  const downloadedHash = await sha256File(tempOriginal);
+  if (normalizeHash(downloadedHash) === normalizeHash(expectedPatchHash)) {
+    unlinkIfExists(tempOriginal);
+    throw new Error("Original download matches patch hash; refusing to fix client.");
+  }
+
+  win.webContents.send(progressChannel, { phase: "online-unpatch", percent: -1 });
+
+  // Swap (safe):
+  // - Move current client (patched) to temp
+  // - Persist it to patched storage (if missing)
+  // - Replace active client with downloaded original
+  const tempCurrent = path.join(paths.root, `temp_current_${Date.now()}_${path.basename(clientPath)}`);
+  moveReplace(clientPath, tempCurrent);
+
+  // Keep a patched copy for later enabling patch.
+  if (!fs.existsSync(paths.patchedPath)) {
+    copyReplace(tempCurrent, paths.patchedPath);
+  }
+
+  // Preserve an original backup and also activate it.
+  if (!fs.existsSync(paths.originalPath)) {
+    copyReplace(tempOriginal, paths.originalPath);
+  }
+
+  moveReplace(tempOriginal, clientPath);
+  unlinkIfExists(tempCurrent);
+
+  win.webContents.send(progressChannel, { phase: "online-unpatch", percent: 100 });
+
+  writePatchState(paths.statePath, {
+    enabled: false,
+    patch_hash: expectedPatchHash,
+    patch_url: version.patch_url,
+    original_url: originalUrl,
+    patch_note: version.patch_note,
+    updatedAt: Date.now(),
+  });
+
+  return "fixed";
+};
+
+export const enableOnlinePatch = async (
   gameDir: string,
   version: GameVersion,
   win: BrowserWindow,
   progressChannel: "install-progress" | "online-patch-progress" = "online-patch-progress",
-): Promise<"patched" | "skipped" | "up-to-date"> => {
-  // Windows-only: the upstream patch mechanism can deliver .exe patchers.
-  // On Linux/macOS we skip this step entirely to avoid breaking the client binary.
+): Promise<"enabled" | "already-enabled" | "skipped"> => {
   if (process.platform !== "win32") return "skipped";
 
   const url = version.patch_url;
   const expectedHash = version.patch_hash;
-
-  // Requirement: if build not in list OR missing url/hash, don't patch.
   if (!url || !expectedHash) return "skipped";
 
-  // On Windows, patch_url is expected to point to a replacement executable.
+  const clientPath = getClientPath(gameDir, version);
+  if (!fs.existsSync(clientPath)) return "skipped";
+
+  const paths = getPatchPaths(clientPath);
+  ensureDirs([paths.root, paths.originalDir, paths.patchedDir]);
+
+  const existing = readPatchState(paths.statePath);
+
+  // If already enabled, only consider it "already" when the active client matches the expected hash.
+  if (existing?.enabled) {
+    try {
+      const currentHash = await sha256File(clientPath);
+      if (normalizeHash(currentHash) === normalizeHash(expectedHash)) return "already-enabled";
+    } catch {
+      // ignore
+    }
+    // Otherwise, proceed to (re)apply the expected patched binary.
+  }
+
+  // Ensure patched exe is downloaded into storage.
+  let patchedOk = false;
+  if (fs.existsSync(paths.patchedPath)) {
+    // Fast path: if the expected hash changed, treat cached patched exe as stale.
+    if (existing?.patch_hash && normalizeHash(existing.patch_hash) !== normalizeHash(expectedHash)) {
+      patchedOk = false;
+    } else {
+      try {
+        const cachedHash = await sha256File(paths.patchedPath);
+        patchedOk = normalizeHash(cachedHash) === normalizeHash(expectedHash);
+      } catch {
+        patchedOk = false;
+      }
+    }
+  }
+
+  if (!patchedOk) {
+    try {
+      if (fs.existsSync(paths.patchedPath)) fs.unlinkSync(paths.patchedPath);
+    } catch {
+      // ignore
+    }
+
+    await downloadFileWithProgress(
+      withCacheBuster(url, `patch-${normalizeHash(expectedHash)}`),
+      paths.tempDownloadPath,
+      win,
+      progressChannel,
+      "online-patch",
+    );
+
+    const downloadedHash = await sha256File(paths.tempDownloadPath);
+    const got = normalizeHash(downloadedHash);
+    const expected = normalizeHash(expectedHash);
+    if (got !== expected) {
+      try {
+        fs.unlinkSync(paths.tempDownloadPath);
+      } catch {
+        // ignore
+      }
+      throw new Error(`Patch hash mismatch (SHA256). Expected ${expected}, got ${got}.`);
+    }
+
+    moveReplace(paths.tempDownloadPath, paths.patchedPath);
+  }
+
+  // Swap (safe):
+  // - Never overwrite a preserved original backup.
+  // - Keep the downloaded patched exe on disk.
+  // - Replace the active client by moving it to a temp file, then copying patched into place.
+  win.webContents.send(progressChannel, { phase: "online-patch", percent: -1 });
+
+  // If we don't have an original backup yet, preserve the current client as original.
+  if (!fs.existsSync(paths.originalPath)) {
+    // Safety: if the current client is already patched, do NOT store it as original.
+    // This can happen if state drifted or a previous swap failed.
+    let currentIsPatched = false;
+    try {
+      const currentHash = await sha256File(clientPath);
+      currentIsPatched = normalizeHash(currentHash) === normalizeHash(expectedHash);
+    } catch {
+      currentIsPatched = false;
+    }
+
+    if (currentIsPatched) {
+      const originalUrl = version.original_url || existing?.original_url;
+      if (!originalUrl) {
+        throw new Error("Cannot preserve original: client is already patched and original_url is missing.");
+      }
+
+      const tempOriginal = path.join(paths.root, `temp_original_${Date.now()}_${path.basename(clientPath)}`);
+      await downloadFileWithProgress(
+        withCacheBuster(originalUrl, `orig-${Date.now()}`),
+        tempOriginal,
+        win,
+        progressChannel,
+        "online-patch",
+      );
+
+      const downloadedHash = await sha256File(tempOriginal);
+      if (normalizeHash(downloadedHash) === normalizeHash(expectedHash)) {
+        unlinkIfExists(tempOriginal);
+        throw new Error("Original download matches patch hash; refusing to preserve.");
+      }
+
+      moveReplace(tempOriginal, paths.originalPath);
+    } else {
+      moveReplace(clientPath, paths.originalPath);
+    }
+  } else {
+    // Original already preserved; move current client out of the way.
+    const tempCurrent = path.join(paths.root, `temp_current_${Date.now()}_${path.basename(clientPath)}`);
+    moveReplace(clientPath, tempCurrent);
+    unlinkIfExists(tempCurrent);
+  }
+
+  copyReplace(paths.patchedPath, clientPath);
+  win.webContents.send(progressChannel, { phase: "online-patch", percent: 100 });
+
+  writePatchState(paths.statePath, {
+    enabled: true,
+    patch_hash: expectedHash,
+    patch_url: url,
+    original_url: version.original_url,
+    patch_note: version.patch_note,
+    updatedAt: Date.now(),
+  });
+
+  return "enabled";
+};
+
+export const disableOnlinePatch = async (
+  gameDir: string,
+  version: GameVersion,
+  win: BrowserWindow,
+  progressChannel: "online-unpatch-progress" = "online-unpatch-progress",
+): Promise<"disabled" | "already-disabled" | "skipped"> => {
+  if (process.platform !== "win32") return "skipped";
+
+  const url = version.patch_url;
+  const expectedHash = version.patch_hash;
+  if (!url || !expectedHash) return "skipped";
+
+  const clientPath = getClientPath(gameDir, version);
+  if (!fs.existsSync(clientPath)) return "skipped";
+
+  const paths = getPatchPaths(clientPath);
+  ensureDirs([paths.root, paths.originalDir, paths.patchedDir]);
+
+  const existing = readPatchState(paths.statePath);
+
+  // Trust disk reality: allow disabling if the active client matches either the current expected hash
+  // or the stored hash (when the server hash has changed since it was applied).
+  let clientIsPatched = false;
+  try {
+    const currentHash = await sha256File(clientPath);
+    const storedHash = existing?.patch_hash;
+    clientIsPatched =
+      normalizeHash(currentHash) === normalizeHash(expectedHash) ||
+      (!!storedHash && normalizeHash(currentHash) === normalizeHash(storedHash));
+  } catch {
+    clientIsPatched = false;
+  }
+
+  if (!existing?.enabled && !clientIsPatched) return "already-disabled";
+
+  if (!fs.existsSync(paths.originalPath)) {
+    const originalUrl = version.original_url || existing?.original_url;
+    if (!originalUrl) {
+      throw new Error("Original client backup not found. Reinstall the game to restore it.");
+    }
+
+    // Legacy recovery: download the original client exe into the backup slot.
+    const tempOriginal = path.join(paths.root, `temp_original_${Date.now()}_${path.basename(clientPath)}`);
+    await downloadFileWithProgress(
+      withCacheBuster(originalUrl, `orig-${Date.now()}`),
+      tempOriginal,
+      win,
+      progressChannel,
+      "online-unpatch",
+    );
+
+    // Safety: if server accidentally serves the patched exe, do not accept it as original.
+    try {
+      const downloadedHash = await sha256File(tempOriginal);
+      if (normalizeHash(downloadedHash) === normalizeHash(expectedHash)) {
+        unlinkIfExists(tempOriginal);
+        throw new Error("Original download matches patch hash; refusing to restore.");
+      }
+    } catch (e) {
+      if (e instanceof Error) throw e;
+      // ignore hash failure
+    }
+
+    moveReplace(tempOriginal, paths.originalPath);
+  }
+
+  // If the preserved "original" is actually the patched exe, recover by re-downloading original_url.
+  try {
+    const originalHash = await sha256File(paths.originalPath);
+    if (normalizeHash(originalHash) === normalizeHash(expectedHash)) {
+      const originalUrl = version.original_url || existing?.original_url;
+      if (!originalUrl) {
+        throw new Error("Original backup is invalid and original_url is missing.");
+      }
+
+      const tempOriginal = path.join(paths.root, `temp_original_${Date.now()}_${path.basename(clientPath)}`);
+      await downloadFileWithProgress(
+        withCacheBuster(originalUrl, `orig-${Date.now()}`),
+        tempOriginal,
+        win,
+        progressChannel,
+        "online-unpatch",
+      );
+
+      const downloadedHash = await sha256File(tempOriginal);
+      if (normalizeHash(downloadedHash) === normalizeHash(expectedHash)) {
+        unlinkIfExists(tempOriginal);
+        throw new Error("Original download matches patch hash; refusing to restore.");
+      }
+
+      moveReplace(tempOriginal, paths.originalPath);
+    }
+  } catch (e) {
+    if (e instanceof Error) throw e;
+    // ignore
+  }
+
+  win.webContents.send(progressChannel, { phase: "online-unpatch", percent: -1 });
+
+  // Swap back (safe):
+  // - Move current client (expected patched) into temp
+  // - Copy temp into patched storage (so patch stays downloaded)
+  // - Copy original backup into active client
+  const tempCurrent = path.join(paths.root, `temp_current_${Date.now()}_${path.basename(clientPath)}`);
+  moveReplace(clientPath, tempCurrent);
+  copyReplace(tempCurrent, paths.patchedPath);
+  copyReplace(paths.originalPath, clientPath);
+  unlinkIfExists(tempCurrent);
+
+  win.webContents.send(progressChannel, { phase: "online-unpatch", percent: 100 });
+
+  writePatchState(paths.statePath, {
+    enabled: false,
+    patch_hash: expectedHash,
+    patch_url: url,
+    original_url: version.original_url || existing?.original_url,
+    patch_note: version.patch_note,
+    updatedAt: Date.now(),
+  });
+
+  // Final sanity: if we still look patched, surface a clear error.
+  try {
+    const afterHash = await sha256File(clientPath);
+    if (normalizeHash(afterHash) === normalizeHash(expectedHash)) {
+      throw new Error("Unpatch completed but client hash is still patched. Use Fix Client.");
+    }
+  } catch (e) {
+    if (e instanceof Error) throw e;
+  }
+
+  return "disabled";
+};
+
+export const checkOnlinePatchNeeded = async (
+  gameDir: string,
+  version: GameVersion,
+): Promise<"needs" | "up-to-date" | "skipped"> => {
+  if (process.platform !== "win32") return "skipped";
+
+  const expectedHash = version.patch_hash;
+  if (!version.patch_url || !expectedHash) return "skipped";
 
   const clientPath = getClientPath(gameDir, version);
   if (!fs.existsSync(clientPath)) return "skipped";
 
   try {
     const currentHash = await sha256File(clientPath).catch(() => null);
-    if (currentHash && normalizeHash(currentHash) === normalizeHash(expectedHash)) {
-      return "up-to-date";
-    }
-
-    const tempPath = path.join(
-      path.dirname(clientPath),
-      `temp_online_patch_${version.build_index}${process.platform === "win32" ? ".exe" : ""}`,
-    );
-
-    await downloadFileWithProgress(url, tempPath, win, progressChannel);
-
-    const downloadedHash = await sha256File(tempPath);
-    if (normalizeHash(downloadedHash) !== normalizeHash(expectedHash)) {
-      try {
-        fs.unlinkSync(tempPath);
-      } catch {
-        // ignore
-      }
-      throw new Error("Patch hash mismatch (SHA256)");
-    }
-
-    // Replace the executable.
-    try {
-      fs.unlinkSync(clientPath);
-    } catch {
-      // ignore
-    }
-
-    try {
-      fs.renameSync(tempPath, clientPath);
-    } catch {
-      // Windows can be picky; fallback to copy.
-      fs.copyFileSync(tempPath, clientPath);
-      try {
-        fs.unlinkSync(tempPath);
-      } catch {
-        // ignore
-      }
-    }
-
-    return "patched";
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    win.webContents.send("online-patch-error", msg);
-    return "skipped";
+    if (!currentHash) return "needs";
+    if (normalizeHash(currentHash) === normalizeHash(expectedHash)) return "up-to-date";
+    return "needs";
+  } catch {
+    return "needs";
   }
 };

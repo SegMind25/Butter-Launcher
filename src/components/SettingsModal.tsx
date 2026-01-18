@@ -1,13 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { FolderOpen } from "lucide-react";
 import { useGameContext } from "../hooks/gameContext";
+import { LAUNCHER_BUILD_STRING } from "../utils/launcherBuild";
 
 const SettingsModal: React.FC<{
   open: boolean;
   onClose: () => void;
   onLogout?: () => void;
 }> = ({ open, onClose, onLogout }) => {
-  const { gameDir } = useGameContext();
+  const { gameDir, checkForUpdates, checkingUpdates } = useGameContext();
   const [customUUID, setCustomUUID] = useState<string>("");
 
   const normalizedUUID = useMemo(() => {
@@ -97,7 +98,7 @@ const SettingsModal: React.FC<{
               Launcher Version
             </label>
             <div className="text-xs text-gray-400 font-mono">
-              ButterLauncher_2026.01.17 V1.0.5
+              {LAUNCHER_BUILD_STRING}
             </div>
           </div>
 
@@ -146,8 +147,12 @@ const SettingsModal: React.FC<{
               LAUNCH
             </button>
           </div> */}
-          <button className="w-full border border-[#3b82f6] text-[#3b82f6] font-bold py-2 rounded-lg hover:bg-[#23293a]/80 transition">
-            CHECK FOR UPDATES
+          <button
+            className="w-full border border-[#3b82f6] text-[#3b82f6] font-bold py-2 rounded-lg hover:bg-[#23293a]/80 transition disabled:opacity-60 disabled:hover:bg-transparent"
+            disabled={checkingUpdates}
+            onClick={() => checkForUpdates("manual")}
+          >
+            {checkingUpdates ? "CHECKING..." : "CHECK FOR UPDATES"}
           </button>
           {/* <button className="w-full border border-red-500 text-red-400 font-bold py-2 rounded-lg hover:bg-red-900/60 transition">
             UNINSTALL...

@@ -3,7 +3,7 @@
   "description": "The best Hytale Launcher",
   "author": "vZyle <vZyle@example.com>",
   "private": false,
-  "version": "1.0.5",
+  "version": "1.0.6",
   "type": "module",
   "main": "dist-electron/main.js",
   "build": {
@@ -25,9 +25,11 @@
   },
   "dependencies": {
     "@kostya-main/discord-rpc": "^1.2.1",
+    "@tabler/icons-react": "^3.36.1",
     "adm-zip": "^0.5.16",
     "electron-updater": "^6.7.3",
     "extract-zip": "^2.0.1",
+    "json5": "^2.2.3",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "semver": "^7.7.3",

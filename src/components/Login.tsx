@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import butterLoginBg from "../assets/butter-login.jpeg";
 import butterLogo from "../assets/butter-logo.png";
 import DragBar from "./DragBar";
+import { LAUNCHER_BUILD_STRING } from "../utils/launcherBuild";
 
 const Login: React.FC<{ onLogin: (username: string) => void }> = ({ onLogin }) => {
   const [nick, setNick] = useState("");
@@ -81,7 +82,7 @@ const Login: React.FC<{ onLogin: (username: string) => void }> = ({ onLogin }) =
         </p>
 
         <div className="absolute bottom-6 left-10 text-xs text-gray-500">
-          ButterLauncher_2026.01.17 V1.0.5
+          {LAUNCHER_BUILD_STRING}
         </div>
       </div>
 
